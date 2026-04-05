@@ -1,0 +1,15 @@
+fastapi==0.116.0
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20
+starlette==0.46.2
+tensorflow==2.21.0
+scikit-learn==1.5.1
+numpy==1.26.4
+pandas==2.2.2
+pillow==10.4.0
+joblib==1.4.2
+shap==0.45.1
+opencv-python==4.8.1.78
+reportlab==4.0.9
+librosa==0.10.2.post1
+soundfile==0.12.1
