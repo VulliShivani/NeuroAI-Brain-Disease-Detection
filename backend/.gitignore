@@ -1,0 +1,15 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Large folders (optional)
+datasets/
+uploads/
+notebooks/
+# OS
+.DS_Store
+Thumbs.db
