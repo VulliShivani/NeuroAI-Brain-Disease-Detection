@@ -133,8 +133,55 @@ const parkinsonRiskMeta = (prediction = "", confidence = 0) => {
   const text = String(prediction).toLowerCase();
   if (/negative|no parkinson pattern/.test(text)) return { risk: "safe", label: "Low", color: "#10B981" };
   if (/possible|uncertain/.test(text)) return { risk: "mild", label: "Moderate", color: "#F59E0B" };
-  if (/positive|detected/.test(text)) return confidence > 70 ? { risk: "danger", label: "High", color: "#EF4444" } : { risk: "mild", label: "Moderate", color: "#F59E0B" };
+  if (/positive|detected|likely|early parkinson/.test(text)) return confidence > 70 ? { risk: "danger", label: "High", color: "#EF4444" } : { risk: "mild", label: "Moderate", color: "#F59E0B" };
   return confidenceMeta(confidence);
+};
+
+const classifyParkinsonDemoTier = (formData, confidence, backendSafe = false) => {
+  const symptoms = formData?.parkSymptoms || {};
+  const symptomCount = Number(formData?.parkinsonSymptomCount || 0);
+  const tremor = Number(formData?.tremorSeverity || 0);
+  const age = Number(formData?.age || 65);
+  const voice = String(formData?.voiceIssues || "none").toLowerCase();
+  const duration = String(formData?.parkDuration || "Less than 6 months").toLowerCase();
+
+  const hasCoreEarly = Boolean(symptoms.tremor) && Boolean(symptoms.bradykinesia);
+  const hasCoreModerate = Boolean(symptoms.tremor) && Boolean(symptoms.rigidity) && Boolean(symptoms.bradykinesia) && Boolean(symptoms.balance);
+  const longEnoughDuration = /6|1|more/.test(duration);
+
+  const lowClinicalSignal = symptomCount === 0 && tremor <= 1 && (voice === "none" || voice === "mild") && age <= 65;
+  const safe = backendSafe || (lowClinicalSignal && confidence <= 55) || confidence < 45;
+  if (safe) {
+    return {
+      safe: true,
+      prediction: "No Parkinson Pattern Detected",
+      stage: "No Significant Pattern",
+    };
+  }
+
+  const moderateProfile = age >= 65 && tremor >= 3 && hasCoreModerate && symptomCount >= 4 && (voice === "moderate" || voice === "severe") && longEnoughDuration;
+  if (moderateProfile) {
+    return {
+      safe: false,
+      prediction: "Parkinson's Likely",
+      stage: "Moderate to High Suspicion",
+    };
+  }
+
+  const earlyProfile = age >= 60 && tremor >= 2 && tremor <= 3 && hasCoreEarly && symptomCount >= 2 && symptomCount <= 3 && (voice === "mild" || voice === "moderate") && longEnoughDuration;
+  if (earlyProfile) {
+    return {
+      safe: false,
+      prediction: "Early Parkinson's",
+      stage: "Early Pattern",
+    };
+  }
+
+  return {
+    safe: false,
+    prediction: confidence <= 70 ? "Possible Parkinson Pattern" : "Parkinson Pattern Detected",
+    stage: confidence <= 70 ? "Mild to Moderate" : "Severe / High Suspicion",
+  };
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -356,8 +403,9 @@ const mapParkinsonBackendResult = (backend, formData) => {
   const xai = getBackendExplainability(backend);
   const confidence = toPercent(backend?.confidence);
   const raw = String(backend?.prediction || "").toLowerCase();
-  const safe = /negative|no parkinson/.test(raw);
-  const prediction = safe ? "No Parkinson Pattern Detected" : confidence <= 70 ? "Possible Parkinson Pattern" : "Parkinson Pattern Detected";
+  const tier = classifyParkinsonDemoTier(formData, confidence, /negative|no parkinson/.test(raw));
+  const safe = tier.safe;
+  const prediction = tier.prediction;
   const risk = parkinsonRiskMeta(prediction, confidence);
 
   const fallbackExplainability = "Voice and speech-derived biomarkers were analyzed for motor-speech irregularity. Feature attribution indicates which speech dimensions most influenced the decision and confidence tier.";
@@ -366,7 +414,7 @@ const mapParkinsonBackendResult = (backend, formData) => {
     ...buildResult("parkinsons", formData),
     prediction,
     confidence,
-    stage: safe ? "No Significant Pattern" : confidence <= 70 ? "Mild to Moderate" : "Severe / High Suspicion",
+    stage: tier.stage,
     recommendation: xai.recommendation || backend?.recommendation || (safe ? "No strong Parkinson pattern detected. Continue follow-up." : "Recommend movement-disorder specialist review."),
     keyFindings: Array.isArray(backend?.key_findings) && backend.key_findings.length
       ? backend.key_findings.slice(0, 4).map((item, idx) => {
@@ -379,7 +427,7 @@ const mapParkinsonBackendResult = (backend, formData) => {
     explainabilityText: xai.detailed || backend?.explanation || fallbackExplainability,
     precautions: xai.precautions || "AI speech screening does not replace neurological examination or standardized movement-disorder assessment.",
     medicalDisclaimer: xai.disclaimer || "AI decision support only. Final diagnosis requires specialist validation.",
-    modalityNote: `${buildResult("parkinsons", formData).modalityNote} | backend inference`,
+    modalityNote: `${buildResult("parkinsons", formData).modalityNote} | backend inference${safe ? " | conservative screen due to weak clinical signal" : ""}`,
     color: risk.color,
   };
 };
@@ -516,23 +564,30 @@ function buildResult(disease, formData) {
     const voice = String(formData?.voiceIssues || "none");
     const symptomCount = Number(formData?.parkinsonSymptomCount || 0);
     const age = Number(formData?.age || 65);
+    const duration = String(formData?.parkDuration || "Less than 6 months");
     const genderBoost = String(formData?.gender || "female") === "male" ? 2 : 0;
     const voiceScore = voice === "severe" ? 18 : voice === "moderate" ? 12 : voice === "mild" ? 7 : 0;
+    const durationScore = duration.includes("Less than 6") ? 0 : duration.includes("6–12") || duration.includes("6-12") ? 4 : duration.includes("1–3") || duration.includes("1-3") ? 8 : 10;
     const speechBoost = formData?.speechFile ? 14 : 0;
-    const conf = clamp(Math.round(16 + tremor * 9 + voiceScore + speechBoost + symptomCount * 4 + genderBoost + (age > 60 ? 4 : 0)), 10, 97);
-    const safe = conf < 45;
+    const conf = clamp(Math.round(16 + tremor * 9 + voiceScore + durationScore + speechBoost + symptomCount * 4 + genderBoost + (age > 60 ? 4 : 0)), 10, 97);
+    const tier = classifyParkinsonDemoTier(formData, conf, false);
+    const safe = tier.safe;
     return {
       disease: "Parkinson's Disease",
-      prediction: safe ? "No Parkinson Pattern Detected" : "Parkinson Pattern Detected",
+      prediction: tier.prediction,
       confidence: conf,
-      stage: stageFromConfidence(conf),
+      stage: tier.stage,
       keyFindings: [
         { label: "Tremor Severity", score: clamp(tremor * 18, 5, 90), risk: tremor >= 4 ? "high" : tremor >= 2 ? "medium" : "low" },
         { label: "Motor Symptoms", score: clamp(Math.round(symptomCount * 13), 5, 90), risk: symptomCount >= 4 ? "high" : symptomCount >= 2 ? "medium" : "low" },
         { label: "Voice/Speech Changes", score: clamp(voiceScore * 4, 8, 88), risk: voice === "severe" ? "high" : voice === "none" ? "low" : "medium" },
         { label: "Speech Signal Evidence", score: formData?.speechFile ? clamp(conf - 10, 22, 92) : 10, risk: formData?.speechFile ? "medium" : "low" },
       ],
-      recommendation: safe ? "Current signs are not strongly suggestive of Parkinson's. Keep clinical follow-up." : "Recommend movement-disorder specialist evaluation and confirmatory testing.",
+      recommendation: safe
+        ? "Current signs are not strongly suggestive of Parkinson's. Keep clinical follow-up."
+        : tier.prediction === "Early Parkinson's"
+          ? "Early Parkinson pattern is possible. Recommend neurologist review and early follow-up planning."
+          : "Recommend movement-disorder specialist evaluation and confirmatory testing.",
       color: confidenceMeta(conf).color,
       modalityNote: formData?.speechFile ? "Voice sample provided with clinical screening" : "Voice sample missing",
     };
@@ -2126,11 +2181,14 @@ function InputFormPage({ disease, onSubmit }) {
   const [gender, setGender] = useState("female");
   const [education, setEducation] = useState("high school");
   const [includeAlzClinical, setIncludeAlzClinical] = useState(true);
+  const [includeParkClinical, setIncludeParkClinical] = useState(true);
+  const [includeParkSpeech, setIncludeParkSpeech] = useState(true);
   const [mmse, setMmse] = useState(24);
   const [alzSymptoms, setAlzSymptoms] = useState({ memoryLoss: true, disorientation: false, language: false, dailyTasks: false });
-  const [tremorSeverity, setTremorSeverity] = useState(3);
-  const [voiceIssues, setVoiceIssues] = useState("mild");
-  const [parkSymptoms, setParkSymptoms] = useState({ tremor: true, rigidity: false, bradykinesia: true, balance: false, speech: false, depression: false, sleep: false });
+  const [tremorSeverity, setTremorSeverity] = useState(0);
+  const [voiceIssues, setVoiceIssues] = useState("none");
+  const [parkDuration, setParkDuration] = useState("Less than 6 months");
+  const [parkSymptoms, setParkSymptoms] = useState({ tremor: false, rigidity: false, bradykinesia: false, balance: false, speech: false, depression: false, sleep: false });
   const [mriImage, setMriImage] = useState(null);
   const [mriPreview, setMriPreview] = useState("");
   const [speechFile, setSpeechFile] = useState(null);
@@ -2163,12 +2221,49 @@ function InputFormPage({ disease, onSubmit }) {
           {disease === "parkinsons" ? "🎙️ Speech File Upload" : "🧬 MRI Image Upload"}
         </div>
         {disease === "parkinsons" ? (
-          <FileUpload
-            label="Upload Voice Recording"
-            accept="audio/*"
-            hint="Supported: .wav, .mp3 — Speech sample (sustained vowel or reading)"
-            onFile={({ file }) => setSpeechFile(file)}
-          />
+          <>
+            <div className="recommend-card" style={{ marginBottom: 14 }}>
+              <InfoIcon size={17} color="var(--primary)" />
+              <div style={{ width: "100%" }}>
+                <p style={{ marginBottom: 8 }}><strong>Do you have patient speech data?</strong></p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ background: includeParkSpeech ? "var(--primary-light)" : "#fff", borderColor: includeParkSpeech ? "var(--primary-mid)" : "var(--border)", color: includeParkSpeech ? "var(--primary)" : "var(--text-mid)", padding: "8px 12px" }}
+                    onClick={() => setIncludeParkSpeech(true)}
+                  >
+                    Yes, I have speech data
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ background: !includeParkSpeech ? "var(--primary-light)" : "#fff", borderColor: !includeParkSpeech ? "var(--primary-mid)" : "var(--border)", color: !includeParkSpeech ? "var(--primary)" : "var(--text-mid)", padding: "8px 12px" }}
+                    onClick={() => {
+                      setIncludeParkSpeech(false);
+                      setSpeechFile(null);
+                    }}
+                  >
+                    No, continue without speech
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {includeParkSpeech ? (
+              <FileUpload
+                label="Upload Voice Recording"
+                accept="audio/*"
+                hint="Supported: .wav, .mp3 — Speech sample (sustained vowel or reading)"
+                onFile={({ file }) => setSpeechFile(file)}
+              />
+            ) : (
+              <div className="disclaimer" style={{ marginTop: 8 }}>
+                <AlertIcon size={18} color="#7C3AED" />
+                <p>Speech section skipped. Parkinson screening will use clinical inputs only.</p>
+              </div>
+            )}
+          </>
         ) : (
           <FileUpload
             label="Upload MRI Image"
@@ -2197,29 +2292,32 @@ function InputFormPage({ disease, onSubmit }) {
         <div className="form-section">
           <div className="form-section-label">📋 Clinical Data</div>
 
-          {disease === "alzheimers" && (
+          {(disease === "alzheimers" || disease === "parkinsons") && (
             <div className="recommend-card" style={{ marginBottom: 14 }}>
               <InfoIcon size={17} color="var(--primary)" />
               <div style={{ width: "100%" }}>
-                <p style={{ marginBottom: 8 }}><strong>Willing to provide clinical data?</strong></p>
+                <p style={{ marginBottom: 8 }}><strong>Do you have clinical data?</strong></p>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button
                     type="button"
                     className="btn-secondary"
-                    style={{ background: includeAlzClinical ? "var(--primary-light)" : "#fff", borderColor: includeAlzClinical ? "var(--primary-mid)" : "var(--border)", color: includeAlzClinical ? "var(--primary)" : "var(--text-mid)", padding: "8px 12px" }}
-                    onClick={() => setIncludeAlzClinical(true)}
+                    style={{ background: (disease === "alzheimers" ? includeAlzClinical : includeParkClinical) ? "var(--primary-light)" : "#fff", borderColor: (disease === "alzheimers" ? includeAlzClinical : includeParkClinical) ? "var(--primary-mid)" : "var(--border)", color: (disease === "alzheimers" ? includeAlzClinical : includeParkClinical) ? "var(--primary)" : "var(--text-mid)", padding: "8px 12px" }}
+                    onClick={() => disease === "alzheimers" ? setIncludeAlzClinical(true) : setIncludeParkClinical(true)}
                   >
                     Yes, include clinical inputs
                   </button>
                   <button
                     type="button"
                     className="btn-secondary"
-                    style={{ background: !includeAlzClinical ? "var(--primary-light)" : "#fff", borderColor: !includeAlzClinical ? "var(--primary-mid)" : "var(--border)", color: !includeAlzClinical ? "var(--primary)" : "var(--text-mid)", padding: "8px 12px" }}
-                    onClick={() => setIncludeAlzClinical(false)}
+                    style={{ background: !(disease === "alzheimers" ? includeAlzClinical : includeParkClinical) ? "var(--primary-light)" : "#fff", borderColor: !(disease === "alzheimers" ? includeAlzClinical : includeParkClinical) ? "var(--primary-mid)" : "var(--border)", color: !(disease === "alzheimers" ? includeAlzClinical : includeParkClinical) ? "var(--primary)" : "var(--text-mid)", padding: "8px 12px" }}
+                    onClick={() => disease === "alzheimers" ? setIncludeAlzClinical(false) : setIncludeParkClinical(false)}
                   >
-                    No, MRI only
+                    No, skip clinical inputs
                   </button>
                 </div>
+                <p style={{ marginTop: 8, fontSize: 12, color: "var(--text-light)" }}>
+                  {disease === "alzheimers" ? "No uses MRI-only Alzheimer analysis." : "No uses voice-only Parkinson analysis."}
+                </p>
               </div>
             </div>
           )}
@@ -2295,7 +2393,7 @@ function InputFormPage({ disease, onSubmit }) {
           )}
 
           {disease === "parkinsons" && (
-            <>
+            includeParkClinical ? <>
               <div className="input-grid">
                 <div className="input-field">
                   <label>Patient Age</label>
@@ -2358,7 +2456,7 @@ function InputFormPage({ disease, onSubmit }) {
                 </div>
                 <div className="input-field">
                   <label>Duration of Symptoms</label>
-                  <select>
+                  <select value={parkDuration} onChange={e => setParkDuration(e.target.value)}>
                     <option>Less than 6 months</option>
                     <option>6–12 months</option>
                     <option>1–3 years</option>
@@ -2370,7 +2468,12 @@ function InputFormPage({ disease, onSubmit }) {
                   <InfoIcon size={17} color="var(--primary)" />
                   <p><strong>Voice input expected:</strong> Uploading a voice sample improves Parkinson analysis. Clinical symptom count now tracks {parkinsonSymptomCount} reported features.</p>
                 </div>
-            </>
+            </> : (
+              <div className="disclaimer" style={{ marginTop: 8 }}>
+                <AlertIcon size={18} color="#7C3AED" />
+                <p>Clinical section skipped. Voice-only Parkinson analysis will be performed.</p>
+              </div>
+            )
           )}
         </div>
       )}
@@ -2387,6 +2490,8 @@ function InputFormPage({ disease, onSubmit }) {
             onSubmit({
               selectedDisease: disease,
               includeAlzClinical,
+              includeParkClinical,
+              includeParkSpeech,
               age,
               gender,
               education,
@@ -2396,6 +2501,7 @@ function InputFormPage({ disease, onSubmit }) {
               alzSymptoms,
               tremorSeverity,
               voiceIssues,
+              parkDuration,
               parkinsonSymptomCount,
               parkSymptoms,
               mriImage,
@@ -2418,7 +2524,7 @@ function InputFormPage({ disease, onSubmit }) {
         </div>
       )}
 
-      {disease === "parkinsons" && !speechFile && (
+      {disease === "parkinsons" && includeParkSpeech && !speechFile && (
         <div className="disclaimer" style={{ marginTop: 14 }}>
           <AlertIcon size={18} color="#D97706" />
           <p>Voice sample not uploaded. Clinical-only fallback will run, but accuracy may be reduced. Voice input is recommended for more accurate Parkinson prediction and should be paired with the symptom checklist above.</p>

@@ -65,8 +65,10 @@ python -m venv .venv
 pip install -r requirements.txt
 pip install tensorflow==2.18.0   # optional for MRI models
 
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+On Windows, if `python` still resolves to the Microsoft Store launcher, run the backend with `.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload` or use `backend\run_backend.ps1`.
 
 ---
 
